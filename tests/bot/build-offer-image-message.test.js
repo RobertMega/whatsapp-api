@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 
 import { createOfferImageMessageBuilder } from '../../src/bot/build-offer-image-message.js'
 
-test('offer image message builder fetches the product thumbnail and creates a caption', async () => {
+test('offer image message builder fetches the product thumbnail and creates a coupon-aware caption', async () => {
   const requestedUrls = []
 
   const builder = createOfferImageMessageBuilder({
@@ -19,16 +19,29 @@ test('offer image message builder fetches the product thumbnail and creates a ca
     },
   })
 
-  const imageMessage = await builder.build({
-    title: 'Notebook Gamer',
-    price: 8999.9,
-    currencyId: 'BRL',
-    thumbnailUrl: 'https://http2.mlstatic.com/product.webp',
-  })
+  const imageMessage = await builder.build(
+    {
+      title: 'Notebook Gamer',
+      price: 8999.9,
+      currencyId: 'BRL',
+      coupon: 'GAMER100',
+      thumbnailUrl: 'https://http2.mlstatic.com/product.webp',
+    },
+    'https://meli.la/1GHAQVQ',
+  )
 
   assert.deepEqual(requestedUrls, ['https://http2.mlstatic.com/product.webp'])
   assert.deepEqual(imageMessage, {
-    caption: 'Oferta: Notebook Gamer\nPreco: R$\u00a08.999,90',
+    caption: [
+      '🔥 PROMOÇÃO',
+      '📦 Notebook Gamer',
+      '💰 R$\u00a08.999,90',
+      '',
+      '🎟️ CUPOM: GAMER100',
+      '',
+      '👉 LINK:',
+      'https://meli.la/1GHAQVQ',
+    ].join('\n'),
     imageBase64: Buffer.from([1, 2, 3, 4]).toString('base64'),
   })
 })

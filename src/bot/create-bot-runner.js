@@ -52,12 +52,6 @@ export function createBotRunner({
                 caption: offerImageMessage.caption,
                 imageBase64: offerImageMessage.imageBase64,
               })
-
-              await whatsappClient.sendTextMessage({
-                sessionId: config.sessionId,
-                to: config.groupJid,
-                body: affiliateLink,
-              })
             } else {
               const body = formatOfferMessage(item, affiliateLink)
               const linkPreview = await linkPreviewBuilder?.build?.(item, affiliateLink)

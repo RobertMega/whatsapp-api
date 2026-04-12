@@ -1,15 +1,10 @@
-function formatPrice(price, currency = 'BRL') {
-  return new Intl.NumberFormat('pt-BR', {
-    style: 'currency',
-    currency,
-  }).format(price)
-}
+import { buildOfferBody } from './build-offer-body.js'
 
 export function createOfferImageMessageBuilder({
   fetchImpl = fetch,
 } = {}) {
   return {
-    async build(item) {
+    async build(item, affiliateLink) {
       if (!item.thumbnailUrl) {
         return null
       }
@@ -22,10 +17,7 @@ export function createOfferImageMessageBuilder({
       const imageBuffer = Buffer.from(await response.arrayBuffer())
 
       return {
-        caption: [
-          `Oferta: ${item.title}`,
-          `Preco: ${formatPrice(item.price, item.currencyId || 'BRL')}`,
-        ].join('\n'),
+        caption: buildOfferBody(item, affiliateLink),
         imageBase64: imageBuffer.toString('base64'),
       }
     },

@@ -57,6 +57,7 @@ test('catalog provider searches all configured filters and normalizes Mercado Li
       title: 'Produto 1',
       price: 99.9,
       originalPrice: 199.9,
+      coupon: null,
       currencyId: 'BRL',
       permalink: 'https://mercadolivre.com/1',
       thumbnailUrl: 'https://http2.mlstatic.com/product-1.webp',
@@ -66,6 +67,7 @@ test('catalog provider searches all configured filters and normalizes Mercado Li
       title: 'Produto 2',
       price: 678.9,
       originalPrice: null,
+      coupon: null,
       currencyId: 'BRL',
       permalink: 'https://mercadolivre.com/2',
       thumbnailUrl: 'https://http2.mlstatic.com/product-2.webp',
@@ -75,6 +77,7 @@ test('catalog provider searches all configured filters and normalizes Mercado Li
       title: 'Produto 1',
       price: 99.9,
       originalPrice: 199.9,
+      coupon: null,
       currencyId: 'BRL',
       permalink: 'https://mercadolivre.com/1',
       thumbnailUrl: 'https://http2.mlstatic.com/product-1.webp',
@@ -84,11 +87,44 @@ test('catalog provider searches all configured filters and normalizes Mercado Li
       title: 'Produto 2',
       price: 678.9,
       originalPrice: null,
+      coupon: null,
       currencyId: 'BRL',
       permalink: 'https://mercadolivre.com/2',
       thumbnailUrl: 'https://http2.mlstatic.com/product-2.webp',
     },
   ])
+})
+
+test('catalog provider normalizes coupon text from API promotion data when available', async () => {
+  const provider = createMercadoLivreCatalogProvider({
+    siteId: 'MLB',
+    limitPerFilter: 1,
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return {
+          results: [{
+            id: 'MLB1',
+            title: 'Produto 1',
+            price: 123.45,
+            currency_id: 'BRL',
+            permalink: 'https://mercadolivre.com/1',
+            secure_thumbnail: 'https://http2.mlstatic.com/product-1.webp',
+            promotions: [
+              {
+                type: 'coupon',
+                text: 'Cupom R$ 20 OFF',
+              },
+            ],
+          }],
+        }
+      },
+    }),
+  })
+
+  const [item] = await provider.search(['creatina'])
+
+  assert.equal(item.coupon, 'R$ 20 OFF')
 })
 
 test('catalog provider falls back to browser scraping when the public API is forbidden', async () => {
@@ -118,6 +154,7 @@ test('catalog provider falls back to browser scraping when the public API is for
             title: 'Creatina 1',
             price: 89.9,
             originalPrice: 99.9,
+            coupon: 'R$ 20 OFF',
             currencyId: 'BRL',
             permalink: 'https://www.mercadolivre.com.br/produto-1/p/MLB10',
             thumbnailUrl: 'https://http2.mlstatic.com/creatina-1.webp',
@@ -126,6 +163,7 @@ test('catalog provider falls back to browser scraping when the public API is for
             id: 'MLB11',
             title: 'Creatina 2',
             price: 99.9,
+            coupon: null,
             currencyId: 'BRL',
             permalink: 'https://www.mercadolivre.com.br/produto-2/p/MLB11',
             thumbnailUrl: 'https://http2.mlstatic.com/creatina-2.webp',
@@ -147,6 +185,7 @@ test('catalog provider falls back to browser scraping when the public API is for
       title: 'Creatina 1',
       price: 89.9,
       originalPrice: 99.9,
+      coupon: 'R$ 20 OFF',
       currencyId: 'BRL',
       permalink: 'https://www.mercadolivre.com.br/produto-1/p/MLB10',
       thumbnailUrl: 'https://http2.mlstatic.com/creatina-1.webp',
@@ -155,6 +194,7 @@ test('catalog provider falls back to browser scraping when the public API is for
       id: 'MLB11',
       title: 'Creatina 2',
       price: 99.9,
+      coupon: null,
       currencyId: 'BRL',
       permalink: 'https://www.mercadolivre.com.br/produto-2/p/MLB11',
       thumbnailUrl: 'https://http2.mlstatic.com/creatina-2.webp',

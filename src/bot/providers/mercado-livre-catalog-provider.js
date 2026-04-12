@@ -10,6 +10,44 @@ async function loadPlaywright(playwrightModule) {
   }
 }
 
+function normalizeCouponText(value) {
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  const text = value.replace(/\s+/g, ' ').trim()
+  if (!text) {
+    return null
+  }
+
+  return text.replace(/^Cupom\s+/i, '').trim() || null
+}
+
+function extractCouponFromPromotions(promotions = []) {
+  for (const promotion of promotions) {
+    if (promotion?.type !== 'coupon') {
+      continue
+    }
+
+    const coupon = normalizeCouponText(promotion.text)
+    if (coupon) {
+      return coupon
+    }
+  }
+
+  return null
+}
+
+function extractCouponFromApiItem(item) {
+  return (
+    normalizeCouponText(item.coupon) ||
+    extractCouponFromPromotions(item.promotions) ||
+    extractCouponFromPromotions(item.promotion?.promotions) ||
+    normalizeCouponText(item.promotion?.text) ||
+    null
+  )
+}
+
 function normalizeApiItem(item) {
   const salePrice = item.sale_price?.amount
 
@@ -18,6 +56,7 @@ function normalizeApiItem(item) {
     title: item.title,
     price: salePrice ?? item.price,
     originalPrice: item.original_price ?? null,
+    coupon: extractCouponFromApiItem(item),
     currencyId: item.currency_id,
     permalink: item.permalink,
     thumbnailUrl: item.secure_thumbnail || item.thumbnail,
@@ -83,6 +122,25 @@ export async function createPlaywrightCatalogSearchSession({
           return Number.parseFloat(`${fraction.replaceAll('.', '')}.${cents}`)
         }
 
+        function extractCouponFromCard(card) {
+          const texts = Array.from(card.querySelectorAll('*'))
+            .map((element) => element.textContent?.replace(/\s+/g, ' ').trim())
+            .filter(Boolean)
+
+          for (const text of texts) {
+            if (!/^Cupom\b/i.test(text)) {
+              continue
+            }
+
+            const coupon = text.replace(/^Cupom\s+/i, '').trim()
+            if (coupon) {
+              return coupon
+            }
+          }
+
+          return null
+        }
+
         const cards = Array.from(document.querySelectorAll('.ui-search-result__wrapper, .poly-card'))
         const items = []
 
@@ -117,6 +175,7 @@ export async function createPlaywrightCatalogSearchSession({
             title,
             price: currentPrice,
             originalPrice,
+            coupon: extractCouponFromCard(card),
             currencyId: currency,
             permalink,
             thumbnailUrl: card.querySelector('img')?.getAttribute('src') || '',

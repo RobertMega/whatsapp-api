@@ -172,7 +172,7 @@ test('runOnce does not allow overlapping executions', async () => {
   await firstRun
 })
 
-test('runOnce sends product image first and affiliate link after when an offer image is available', async () => {
+test('runOnce sends a single image message with the final caption when an offer image is available', async () => {
   const repository = createRepositoryDouble()
   const sentMessages = []
 
@@ -190,6 +190,7 @@ test('runOnce sends product image first and affiliate link after when an offer i
             id: 'MLB-1',
             title: 'Produto 1',
             price: 10,
+            coupon: 'TESTE10',
             permalink: 'https://example.com/1',
             thumbnailUrl: 'https://example.com/1.jpg',
           },
@@ -202,10 +203,19 @@ test('runOnce sends product image first and affiliate link after when an offer i
       },
     },
     offerImageBuilder: {
-      async build(item) {
+      async build(item, affiliateLink) {
         return {
           imageBase64: Buffer.from(`image:${item.id}`).toString('base64'),
-          caption: `Oferta: ${item.title}\nPreco: R$ 10,00`,
+          caption: [
+            '🔥 PROMOÇÃO',
+            `📦 ${item.title}`,
+            '💰 R$ 10,00',
+            '',
+            `🎟️ CUPOM: ${item.coupon}`,
+            '',
+            '👉 LINK:',
+            affiliateLink,
+          ].join('\n'),
         }
       },
     },
@@ -224,23 +234,24 @@ test('runOnce sends product image first and affiliate link after when an offer i
   const result = await runner.runOnce()
 
   assert.equal(result.sentCount, 1)
-  assert.equal(sentMessages.length, 2)
+  assert.equal(sentMessages.length, 1)
   assert.deepEqual(sentMessages, [
     {
       type: 'image',
       payload: {
         sessionId: 'sales-session',
         to: '120363400000000000@g.us',
-        caption: 'Oferta: Produto 1\nPreco: R$ 10,00',
+        caption: [
+          '🔥 PROMOÇÃO',
+          '📦 Produto 1',
+          '💰 R$ 10,00',
+          '',
+          '🎟️ CUPOM: TESTE10',
+          '',
+          '👉 LINK:',
+          'https://example.com/1?aff=1',
+        ].join('\n'),
         imageBase64: Buffer.from('image:MLB-1').toString('base64'),
-      },
-    },
-    {
-      type: 'text',
-      payload: {
-        sessionId: 'sales-session',
-        to: '120363400000000000@g.us',
-        body: 'https://example.com/1?aff=1',
       },
     },
   ])

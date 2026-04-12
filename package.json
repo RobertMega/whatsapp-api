@@ -9,7 +9,7 @@
     "start": "node src/server.js",
     "bot": "node src/bot/main.js",
     "affiliate:login": "node src/bot/login-affiliate-session.js",
-    "test": "node tests/api/session-chats.test.js && node tests/api/send-text-link-preview.test.js && node tests/bot/run-posting-cycle.test.js && node tests/bot/mercado-livre-provider.test.js && node tests/bot/affiliate-link-provider.test.js && node tests/bot/format-offer-message.test.js && node tests/bot/build-offer-link-preview.test.js && node tests/bot/build-offer-image-message.test.js && node tests/bot/whatsapp-api-client.test.js",
+    "test": "node tests/api/session-chats.test.js && node tests/api/send-text-link-preview.test.js && node tests/bot/run-posting-cycle.test.js && node tests/bot/mercado-livre-provider.test.js && node tests/bot/affiliate-link-provider.test.js && node tests/bot/affiliate-login-bootstrap.test.js && node tests/bot/format-offer-message.test.js && node tests/bot/build-offer-link-preview.test.js && node tests/bot/build-offer-image-message.test.js && node tests/bot/whatsapp-api-client.test.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev --name init",
     "db:push": "prisma db push",

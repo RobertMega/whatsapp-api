@@ -5,67 +5,50 @@ import { chromium } from 'playwright'
 
 import { loadEnv } from '../lib/load-env.js'
 import { getBotConfig } from './config.js'
-
-function isLoginUrl(url) {
-  return /\/lgz\/|\/login/.test(url)
-}
+import { createAffiliateLoginBootstrap } from './affiliate-login-bootstrap.js'
 
 loadEnv()
 
 const { affiliate } = getBotConfig()
-
-if (!affiliate.userDataDir) {
-  throw new Error(
-    'Set ML_AFFILIATE_PLAYWRIGHT_USER_DATA_DIR before running the affiliate login bootstrap.',
-  )
-}
-
-const launchOptions = {
-  headless: false,
-}
-
-if (affiliate.channel) {
-  launchOptions.channel = affiliate.channel
-}
-
-if (affiliate.executablePath) {
-  launchOptions.executablePath = affiliate.executablePath
-}
-
-if (affiliate.userAgent) {
-  launchOptions.userAgent = affiliate.userAgent
-}
-
-const context = await chromium.launchPersistentContext(affiliate.userDataDir, launchOptions)
-const page = context.pages()[0] || (await context.newPage())
 const rl = createInterface({
   input: process.stdin,
   output: process.stdout,
 })
 
+const bootstrap = createAffiliateLoginBootstrap({
+  affiliate,
+  launchPersistentContext: (userDataDir, options) => chromium.launchPersistentContext(userDataDir, options),
+})
+
+const session = await bootstrap.open()
+
 try {
-  await page.goto(affiliate.hubUrl, { waitUntil: 'domcontentloaded' })
+  if (session.mode === 'temporary_profile') {
+    process.stdout.write(
+      '\nNao foi possivel abrir sessions/affiliate-profile. O login sera feito em um perfil temporario limpo e a sessao autenticada sera salva em sessions/affiliate-storage-state.json.\n\n',
+    )
+  }
 
   process.stdout.write(
-    '\nFaça o login manual no navegador aberto. Depois volte ao terminal e pressione Enter.\n\n',
+    '\nFaca o login manual no navegador aberto. Depois volte ao terminal e pressione Enter.\n\n',
   )
-  await rl.question('')
 
-  await page.goto(affiliate.hubUrl, { waitUntil: 'networkidle' })
-
-  if (isLoginUrl(page.url())) {
-    throw new Error('Login was not completed for the affiliate profile.')
+  if (process.stdin.isTTY) {
+    await rl.question('')
+  } else {
+    process.stdout.write('Terminal sem entrada interativa. Vou aguardar a conclusao do login automaticamente.\n')
+    await session.waitForAuthentication()
   }
 
-  if (affiliate.storageStatePath) {
-    await context.storageState({
-      path: affiliate.storageStatePath,
-      indexedDB: true,
-    })
-  }
+  await session.ensureAuthenticated()
+  await session.save()
 
-  process.stdout.write(`Sessão de afiliado salva em ${affiliate.userDataDir}\n`)
+  process.stdout.write(
+    session.mode === 'temporary_profile'
+      ? 'Sessao de afiliado salva em sessions/affiliate-storage-state.json usando perfil temporario.\n'
+      : `Sessao de afiliado salva em ${affiliate.userDataDir}\n`,
+  )
 } finally {
   rl.close()
-  await context.close()
+  await session.close()
 }
