@@ -6,6 +6,7 @@ export function renderPanel(sessions) {
       connecting: ['#f59e0b', '⟳ Conectando'],
       qr_pending: ['#3b82f6', '◉ QR Pendente'],
       reconnecting: ['#f97316', '↺ Reconectando'],
+      needs_reauth: ['#dc2626', 'QR Necessário'],
       disconnected: ['#6b7280', '✕ Desconectado'],
     }
     const [color, label] = map[status] ?? ['#6b7280', status]
@@ -22,6 +23,9 @@ export function renderPanel(sessions) {
         <td style="padding:14px 16px;">
           ${s.status === 'qr_pending' || s.status === 'connecting'
             ? `<button onclick="showQR('${s.id}')" style="background:#3b82f6;color:#fff;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px;">Ver QR</button>`
+            : ''}
+          ${s.status === 'needs_reauth'
+            ? `<button onclick="reconnectSession('${s.name}')" style="background:#dc2626;color:#fff;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px;">Reconectar</button>`
             : ''}
           <button onclick="deleteSession('${s.id}')" style="background:#ef4444;color:#fff;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px;margin-left:4px;">Remover</button>
         </td>
@@ -157,8 +161,8 @@ export function renderPanel(sessions) {
     setTimeout(()=>el.classList.remove('show'), 3000)
   }
 
-  async function createSession(){
-    const name = document.getElementById('session-name').value.trim()
+  async function createSession(nameOverride){
+    const name = (nameOverride || document.getElementById('session-name').value).trim()
     if(!name) return toast('Digite um nome para a sessão', '#ef4444')
     try {
       const r = await fetch('/api/sessions', {
@@ -171,6 +175,10 @@ export function renderPanel(sessions) {
       toast('Sessão iniciada! Aguarde o QR Code...', '#22c55e')
       setTimeout(()=>location.reload(), 2500)
     } catch(e) { toast('Erro de rede', '#ef4444') }
+  }
+
+  function reconnectSession(name){
+    return createSession(name)
   }
 
   async function showQR(id){

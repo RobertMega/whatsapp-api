@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createBotRunner } from '../../src/bot/create-bot-runner.js'
+import { createPostingBatchSelector } from '../../src/bot/select-posting-batch.js'
 
 function createRepositoryDouble(publishedIds = []) {
   const published = new Set(publishedIds)
@@ -35,8 +36,27 @@ function createRepositoryDouble(publishedIds = []) {
   }
 }
 
+function createDeterministicBatchSelector() {
+  return createPostingBatchSelector({
+    randomInt: (max) => max - 1,
+  })
+}
+
+function createNeverResolvingPromise() {
+  return new Promise(() => {})
+}
+
+function createAffiliateLinkResult(url, overrides = {}) {
+  return {
+    url,
+    source: 'affiliate',
+    usedFallback: false,
+    ...overrides,
+  }
+}
+
 test('runOnce sends up to 5 non-duplicated offers and stores sent items', async () => {
-  const repository = createRepositoryDouble(['MLB-2'])
+  const repository = createRepositoryDouble(['id:mlb-2'])
   const sentMessages = []
 
   const runner = createBotRunner({
@@ -60,7 +80,7 @@ test('runOnce sends up to 5 non-duplicated offers and stores sent items', async 
     },
     affiliateProvider: {
       async getAffiliateLink(item) {
-        return `${item.permalink}?aff=1`
+        return createAffiliateLinkResult(`${item.permalink}?aff=1`)
       },
     },
     whatsappClient: {
@@ -70,6 +90,7 @@ test('runOnce sends up to 5 non-duplicated offers and stores sent items', async 
     },
     repository,
     logger: { error() {} },
+    batchSelector: createDeterministicBatchSelector(),
   })
 
   const result = await runner.runOnce()
@@ -77,7 +98,7 @@ test('runOnce sends up to 5 non-duplicated offers and stores sent items', async 
   assert.equal(result.sentCount, 5)
   assert.equal(result.skippedDuplicates, 1)
   assert.equal(sentMessages.length, 5)
-  assert.deepEqual(repository.sentItems.map((item) => item.itemId), ['MLB-1', 'MLB-3', 'MLB-4', 'MLB-5', 'MLB-6'])
+  assert.deepEqual(repository.sentItems.map((item) => item.itemId), ['id:mlb-1', 'id:mlb-3', 'id:mlb-4', 'id:mlb-5', 'id:mlb-6'])
   assert.equal(repository.failures.length, 0)
 })
 
@@ -107,7 +128,7 @@ test('runOnce skips items whose affiliate link generation fails and continues se
           throw new Error('Affiliate unavailable')
         }
 
-        return `${item.permalink}?aff=1`
+        return createAffiliateLinkResult(`${item.permalink}?aff=1`)
       },
     },
     whatsappClient: {
@@ -117,15 +138,16 @@ test('runOnce skips items whose affiliate link generation fails and continues se
     },
     repository,
     logger: { error() {} },
+    batchSelector: createDeterministicBatchSelector(),
   })
 
   const result = await runner.runOnce()
 
-  assert.equal(result.sentCount, 2)
+  assert.equal(result.sentCount, 1)
   assert.equal(repository.failures.length, 1)
-  assert.equal(repository.failures[0].itemId, 'MLB-2')
-  assert.deepEqual(repository.sentItems.map((item) => item.itemId), ['MLB-1', 'MLB-3'])
-  assert.equal(sentMessages.length, 2)
+  assert.equal(repository.failures[0].itemId, 'id:mlb-2')
+  assert.deepEqual(repository.sentItems.map((item) => item.itemId), ['id:mlb-1'])
+  assert.equal(sentMessages.length, 1)
 })
 
 test('runOnce does not allow overlapping executions', async () => {
@@ -152,7 +174,7 @@ test('runOnce does not allow overlapping executions', async () => {
     },
     affiliateProvider: {
       async getAffiliateLink(item) {
-        return `${item.permalink}?aff=1`
+        return createAffiliateLinkResult(`${item.permalink}?aff=1`)
       },
     },
     whatsappClient: {
@@ -160,6 +182,7 @@ test('runOnce does not allow overlapping executions', async () => {
     },
     repository,
     logger: { error() {} },
+    batchSelector: createDeterministicBatchSelector(),
   })
 
   const firstRun = runner.runOnce()
@@ -170,6 +193,185 @@ test('runOnce does not allow overlapping executions', async () => {
 
   releaseCatalog()
   await firstRun
+})
+
+test('runOnce asks the catalog provider for enough unpublished items to fill the batch', async () => {
+  const repository = createRepositoryDouble(['id:mlb-1'])
+  let receivedSearchOptions = null
+
+  const runner = createBotRunner({
+    config: {
+      sessionId: 'sales-session',
+      groupJid: '120363400000000000@g.us',
+      postsPerRun: 3,
+      filters: ['monitor'],
+    },
+    catalogProvider: {
+      async search(filters, options) {
+        receivedSearchOptions = { filters, options }
+
+        return [
+          { id: 'MLB-2', title: 'Produto 2', price: 20, permalink: 'https://example.com/2' },
+          { id: 'MLB-3', title: 'Produto 3', price: 30, permalink: 'https://example.com/3' },
+          { id: 'MLB-4', title: 'Produto 4', price: 40, permalink: 'https://example.com/4' },
+        ]
+      },
+    },
+    affiliateProvider: {
+      async getAffiliateLink(item) {
+        return createAffiliateLinkResult(`${item.permalink}?aff=1`)
+      },
+    },
+    whatsappClient: {
+      async sendTextMessage() {},
+    },
+    repository,
+    logger: { error() {} },
+    batchSelector: createDeterministicBatchSelector(),
+  })
+
+  await runner.runOnce()
+
+  assert.deepEqual(receivedSearchOptions.filters, ['monitor'])
+  assert.equal(receivedSearchOptions.options.targetItemCount, 3)
+})
+
+test('runOnce gives the catalog provider the same history check used by the final batch selector', async () => {
+  const repository = createRepositoryDouble(['id:mlb-1'])
+  let receivedSearchOptions = null
+
+  const runner = createBotRunner({
+    config: {
+      sessionId: 'sales-session',
+      groupJid: '120363400000000000@g.us',
+      postsPerRun: 1,
+      filters: ['monitor'],
+    },
+    catalogProvider: {
+      async search(filters, options) {
+        receivedSearchOptions = options
+        assert.equal(await options.isRecentlyPublished({
+          id: 'MLB-1',
+          title: 'Produto publicado',
+          permalink: 'https://example.com/1',
+        }), true)
+        assert.equal(await options.isRecentlyPublished({
+          id: 'MLB-2',
+          title: 'Produto novo',
+          permalink: 'https://example.com/2',
+        }), false)
+
+        return [
+          { id: 'MLB-2', title: 'Produto novo', price: 20, permalink: 'https://example.com/2' },
+        ]
+      },
+    },
+    affiliateProvider: {
+      async getAffiliateLink(item) {
+        return createAffiliateLinkResult(`${item.permalink}?aff=1`)
+      },
+    },
+    whatsappClient: {
+      async sendTextMessage() {},
+    },
+    repository,
+    logger: { error() {} },
+    batchSelector: createDeterministicBatchSelector(),
+  })
+
+  const result = await runner.runOnce()
+
+  assert.equal(typeof receivedSearchOptions.isRecentlyPublished, 'function')
+  assert.equal(result.sentCount, 1)
+  assert.deepEqual(repository.sentItems.map((item) => item.itemId), ['id:mlb-2'])
+})
+
+test('runOnce alternates source filters before sending when the catalog has variety', async () => {
+  const repository = createRepositoryDouble()
+  const sentMessages = []
+
+  const runner = createBotRunner({
+    config: {
+      sessionId: 'sales-session',
+      groupJid: '120363400000000000@g.us',
+      postsPerRun: 5,
+      filters: ['air fryer', 'creatina', 'echo dot'],
+    },
+    catalogProvider: {
+      async search() {
+        return [
+          { id: 'MLB-1', title: 'Air 1', price: 10, permalink: 'https://example.com/1', sourceFilter: 'air fryer' },
+          { id: 'MLB-2', title: 'Air 2', price: 20, permalink: 'https://example.com/2', sourceFilter: 'air fryer' },
+          { id: 'MLB-3', title: 'Echo 1', price: 30, permalink: 'https://example.com/3', sourceFilter: 'echo dot' },
+          { id: 'MLB-4', title: 'Creatina 1', price: 40, permalink: 'https://example.com/4', sourceFilter: 'creatina' },
+          { id: 'MLB-5', title: 'Echo 2', price: 50, permalink: 'https://example.com/5', sourceFilter: 'echo dot' },
+          { id: 'MLB-6', title: 'Creatina 2', price: 60, permalink: 'https://example.com/6', sourceFilter: 'creatina' },
+        ]
+      },
+    },
+    affiliateProvider: {
+      async getAffiliateLink(item) {
+        return createAffiliateLinkResult(`${item.permalink}?aff=1`)
+      },
+    },
+    whatsappClient: {
+      async sendTextMessage(payload) {
+        sentMessages.push(payload)
+      },
+    },
+    repository,
+    logger: { error() {} },
+    batchSelector: createDeterministicBatchSelector(),
+  })
+
+  await runner.runOnce()
+
+  assert.deepEqual(repository.sentItems.map((item) => item.itemId), ['id:mlb-1', 'id:mlb-4', 'id:mlb-3', 'id:mlb-2', 'id:mlb-6'])
+  assert.deepEqual(repository.sentItems.map((item) => item.title), ['Air 1', 'Creatina 1', 'Echo 1', 'Air 2', 'Creatina 2'])
+})
+
+test('runOnce rotates the filter window between consecutive runs so the same first categories do not repeat', async () => {
+  const repository = createRepositoryDouble()
+  const searchFilterOrders = []
+
+  const runner = createBotRunner({
+    config: {
+      sessionId: 'sales-session',
+      groupJid: '120363400000000000@g.us',
+      postsPerRun: 3,
+      filters: ['alexa', 'ar condicionado', 'aspirador robo', 'creatina', 'echo dot', 'iphone'],
+    },
+    catalogProvider: {
+      async search(filters) {
+        searchFilterOrders.push(filters)
+
+        return filters.map((filter, index) => ({
+          id: `MLB-${filter.replace(/\s+/g, '-')}`,
+          title: `Produto ${filter}`,
+          price: 10 + index,
+          permalink: `https://example.com/${filter.replace(/\s+/g, '-')}`,
+          sourceFilter: filter,
+        }))
+      },
+    },
+    affiliateProvider: {
+      async getAffiliateLink(item) {
+        return createAffiliateLinkResult(`${item.permalink}?aff=1`)
+      },
+    },
+    whatsappClient: {
+      async sendTextMessage() {},
+    },
+    repository,
+    logger: { error() {} },
+    batchSelector: createDeterministicBatchSelector(),
+  })
+
+  await runner.runOnce()
+  await runner.runOnce()
+
+  assert.deepEqual(searchFilterOrders[0].slice(0, 3), ['alexa', 'ar condicionado', 'aspirador robo'])
+  assert.deepEqual(searchFilterOrders[1].slice(0, 3), ['creatina', 'echo dot', 'iphone'])
 })
 
 test('runOnce sends a single image message with the final caption when an offer image is available', async () => {
@@ -199,7 +401,7 @@ test('runOnce sends a single image message with the final caption when an offer 
     },
     affiliateProvider: {
       async getAffiliateLink(item) {
-        return `${item.permalink}?aff=1`
+        return createAffiliateLinkResult(`${item.permalink}?aff=1`)
       },
     },
     offerImageBuilder: {
@@ -229,6 +431,7 @@ test('runOnce sends a single image message with the final caption when an offer 
     },
     repository,
     logger: { error() {} },
+    batchSelector: createDeterministicBatchSelector(),
   })
 
   const result = await runner.runOnce()
@@ -255,4 +458,254 @@ test('runOnce sends a single image message with the final caption when an offer 
       },
     },
   ])
+})
+
+test('runOnce builds a closed varied batch from the aggregated pool and logs selection metrics', async () => {
+  const repository = createRepositoryDouble(['id:mlb-history'])
+  const sentMessages = []
+  const infoLogs = []
+  const selectedReferences = []
+
+  const runner = createBotRunner({
+    config: {
+      sessionId: 'sales-session',
+      groupJid: '120363400000000000@g.us',
+      postsPerRun: 3,
+      filters: ['air fryer', 'creatina', 'echo dot'],
+    },
+    catalogProvider: {
+      async search() {
+        return {
+          termsProcessed: 3,
+          rawItemsFound: 6,
+          items: [
+            { id: 'MLB-1', title: 'Air Fryer', price: 10, permalink: 'https://example.com/1?utm=abc', sourceFilter: 'air fryer' },
+            { id: 'MLB-1', title: 'Air Fryer', price: 10, permalink: 'https://example.com/1?utm=xyz', sourceFilter: 'creatina' },
+            { id: 'MLB-history', title: 'Creatina', price: 20, permalink: 'https://example.com/2', sourceFilter: 'creatina' },
+            { id: 'MLB-3', title: 'Echo Dot', price: 30, permalink: 'https://example.com/3', sourceFilter: 'echo dot' },
+            { id: 'MLB-4', title: 'Echo Dot', price: 30, permalink: 'https://example.com/4', sourceFilter: 'air fryer' },
+            { id: 'MLB-5', title: 'Mouse Gamer', price: 40, permalink: 'https://example.com/5', sourceFilter: 'echo dot' },
+          ],
+        }
+      },
+    },
+    affiliateProvider: {
+      async getAffiliateLink(item) {
+        selectedReferences.push(item)
+        return createAffiliateLinkResult(`${item.permalink}?aff=1`)
+      },
+    },
+    whatsappClient: {
+      async sendTextMessage(payload) {
+        sentMessages.push(payload)
+      },
+    },
+    repository,
+    logger: {
+      info(payload) {
+        infoLogs.push(payload)
+      },
+      error() {},
+    },
+    batchSelector: createDeterministicBatchSelector(),
+  })
+
+  const result = await runner.runOnce()
+
+  assert.equal(result.sentCount, 3)
+  assert.equal(result.skippedDuplicates, 1)
+  assert.deepEqual(repository.sentItems.map((item) => item.itemId), ['id:mlb-1', 'id:mlb-3', 'id:mlb-5'])
+  assert.equal(new Set(selectedReferences).size, 3)
+  assert.equal(Object.isFrozen(selectedReferences[0]), true)
+  assert.equal(infoLogs.length, 5)
+  assert.deepEqual(infoLogs[0], {
+    event: 'bot_posting_batch_built',
+    executionId: 'exec-1',
+    termsProcessed: 3,
+    rawItemsFound: 6,
+    duplicatesRemoved: 2,
+    historyBlocked: 1,
+    selectedCount: 3,
+  })
+  assert.deepEqual(infoLogs[1], {
+    event: 'bot_posting_batch_selected',
+    executionId: 'exec-1',
+    items: [
+      { itemId: 'id:mlb-1', title: 'Air Fryer', sourceFilter: 'air fryer' },
+      { itemId: 'id:mlb-3', title: 'Echo Dot', sourceFilter: 'echo dot' },
+      { itemId: 'id:mlb-5', title: 'Mouse Gamer', sourceFilter: 'echo dot' },
+    ],
+  })
+  assert.deepEqual(infoLogs.slice(2), [
+    {
+      event: 'affiliate_link_generated',
+      executionId: 'exec-1',
+      itemId: 'id:mlb-1',
+      source: 'affiliate',
+      usedFallback: false,
+    },
+    {
+      event: 'affiliate_link_generated',
+      executionId: 'exec-1',
+      itemId: 'id:mlb-3',
+      source: 'affiliate',
+      usedFallback: false,
+    },
+    {
+      event: 'affiliate_link_generated',
+      executionId: 'exec-1',
+      itemId: 'id:mlb-5',
+      source: 'affiliate',
+      usedFallback: false,
+    },
+  ])
+})
+
+test('runOnce fails the execution when catalog search exceeds the configured timeout', async () => {
+  const repository = createRepositoryDouble()
+
+  const runner = createBotRunner({
+    config: {
+      sessionId: 'sales-session',
+      groupJid: '120363400000000000@g.us',
+      postsPerRun: 1,
+      filters: ['air fryer'],
+      catalogSearchTimeoutMs: 10,
+    },
+    catalogProvider: {
+      async search() {
+        return createNeverResolvingPromise()
+      },
+    },
+    affiliateProvider: {
+      async getAffiliateLink(item) {
+        return createAffiliateLinkResult(`${item.permalink}?aff=1`)
+      },
+    },
+    whatsappClient: {
+      async sendTextMessage() {},
+    },
+    repository,
+    logger: { error() {} },
+    batchSelector: createDeterministicBatchSelector(),
+  })
+
+  await assert.rejects(() => runner.runOnce(), /catalog search timed out/i)
+  assert.equal(repository.executions[0].status, 'failed')
+  assert.match(repository.executions[0].errorMessage, /catalog search timed out/i)
+  assert.ok(repository.executions[0].finishedAt instanceof Date)
+})
+
+test('runOnce records a timed out item failure and continues with the next item', async () => {
+  const repository = createRepositoryDouble()
+  const sentMessages = []
+
+  const runner = createBotRunner({
+    config: {
+      sessionId: 'sales-session',
+      groupJid: '120363400000000000@g.us',
+      postsPerRun: 2,
+      filters: ['cafeteira'],
+      offerProcessingTimeoutMs: 10,
+    },
+    catalogProvider: {
+      async search() {
+        return [
+          { id: 'MLB-1', title: 'Produto 1', price: 10, permalink: 'https://example.com/1' },
+          { id: 'MLB-2', title: 'Produto 2', price: 20, permalink: 'https://example.com/2' },
+        ]
+      },
+    },
+    affiliateProvider: {
+      async getAffiliateLink(item) {
+        if (item.id === 'MLB-1') {
+          return createNeverResolvingPromise()
+        }
+
+        return createAffiliateLinkResult(`${item.permalink}?aff=1`)
+      },
+    },
+    whatsappClient: {
+      async sendTextMessage(payload) {
+        sentMessages.push(payload)
+      },
+    },
+    repository,
+    logger: { error() {} },
+    batchSelector: createDeterministicBatchSelector(),
+  })
+
+  const result = await runner.runOnce()
+
+  assert.equal(result.sentCount, 1)
+  assert.equal(repository.failures.length, 1)
+  assert.equal(repository.failures[0].itemId, 'id:mlb-1')
+  assert.match(repository.failures[0].reason, /bot offer processing .* timed out/i)
+  assert.deepEqual(repository.sentItems.map((item) => item.itemId), ['id:mlb-2'])
+  assert.equal(sentMessages.length, 1)
+})
+
+test('runOnce posts with the permalink fallback when affiliate authentication expires and logs the fallback', async () => {
+  const repository = createRepositoryDouble()
+  const sentMessages = []
+  const infoLogs = []
+
+  const runner = createBotRunner({
+    config: {
+      sessionId: 'sales-session',
+      groupJid: '120363400000000000@g.us',
+      postsPerRun: 1,
+      filters: ['air fryer'],
+    },
+    catalogProvider: {
+      async search() {
+        return [
+          { id: 'MLB-1', title: 'Produto 1', price: 10, permalink: 'https://example.com/1' },
+        ]
+      },
+    },
+    affiliateProvider: {
+      async getAffiliateLink(item) {
+        return createAffiliateLinkResult(item.permalink, {
+          source: 'permalink',
+          usedFallback: true,
+          fallbackReason: 'affiliate_reauth_required',
+        })
+      },
+    },
+    whatsappClient: {
+      async sendTextMessage(payload) {
+        sentMessages.push(payload)
+      },
+    },
+    repository,
+    logger: {
+      info(payload) {
+        infoLogs.push(payload)
+      },
+      error() {},
+    },
+    batchSelector: createDeterministicBatchSelector(),
+  })
+
+  const result = await runner.runOnce()
+
+  assert.equal(result.sentCount, 1)
+  assert.equal(sentMessages.length, 1)
+  assert.equal(sentMessages[0].body.includes('https://example.com/1'), true)
+  assert.equal(repository.sentItems[0].affiliateLink, 'https://example.com/1')
+  assert.deepEqual(infoLogs.at(-2), {
+    event: 'affiliate_link_fallback_used',
+    executionId: 'exec-1',
+    itemId: 'id:mlb-1',
+    source: 'permalink',
+    fallbackReason: 'affiliate_reauth_required',
+  })
+  assert.deepEqual(infoLogs.at(-1), {
+    event: 'affiliate_link_generated',
+    executionId: 'exec-1',
+    itemId: 'id:mlb-1',
+    source: 'permalink',
+    usedFallback: true,
+  })
 })

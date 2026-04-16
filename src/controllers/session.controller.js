@@ -6,6 +6,16 @@ export function createSessionController({
   prismaClient = prisma,
   whatsappService = whatsapp,
 } = {}) {
+  function resolveSessionStatus(sessionId, persistedStatus) {
+    const runtimeStatus = whatsappService.getSessionStatus(sessionId)
+
+    if (runtimeStatus === 'disconnected' && persistedStatus === 'needs_reauth') {
+      return 'needs_reauth'
+    }
+
+    return runtimeStatus || persistedStatus
+  }
+
   return {
     async listSessions(req, reply) {
       const sessions = await prismaClient.session.findMany({
@@ -14,7 +24,7 @@ export function createSessionController({
 
       const result = sessions.map((s) => ({
         ...s,
-        status: whatsappService.getSessionStatus(s.id) || s.status,
+        status: resolveSessionStatus(s.id, s.status),
         hasQR: !!whatsappService.getSessionQR(s.id),
       }))
 
@@ -31,7 +41,9 @@ export function createSessionController({
       const sessionId = name.trim().toLowerCase().replace(/\s+/g, '-')
 
       const existing = await prismaClient.session.findUnique({ where: { id: sessionId } })
-      if (existing && whatsappService.getSessionStatus(sessionId) !== 'disconnected') {
+      const currentStatus = existing ? resolveSessionStatus(sessionId, existing.status) : 'disconnected'
+
+      if (existing && !['disconnected', 'needs_reauth'].includes(currentStatus)) {
         return reply.code(409).send({ error: 'Session already active', sessionId })
       }
 
@@ -47,7 +59,7 @@ export function createSessionController({
 
       return reply.send({
         ...session,
-        status: whatsappService.getSessionStatus(id) || session.status,
+        status: resolveSessionStatus(id, session.status),
         hasQR: !!whatsappService.getSessionQR(id),
       })
     },
@@ -71,7 +83,13 @@ export function createSessionController({
         return reply.code(404).send({ error: 'Session not found' })
       }
 
-      if (whatsappService.getSessionStatus(id) !== 'connected') {
+      const status = resolveSessionStatus(id, session.status)
+
+      if (status === 'needs_reauth') {
+        return reply.code(409).send({ error: `Session "${id}" requires re-authentication via QR code` })
+      }
+
+      if (status !== 'connected') {
         return reply.code(409).send({ error: `Session "${id}" is not connected yet` })
       }
 

@@ -50,6 +50,23 @@ export function createPrismaBotRepository({ prismaClient = prisma } = {}) {
       })
     },
 
+    async markStaleExecutionsAsFailed({
+      now = new Date(),
+      errorMessage = 'Execution interrupted before completion',
+    } = {}) {
+      return prismaClient.postingExecution.updateMany({
+        where: {
+          status: 'running',
+          finishedAt: null,
+        },
+        data: {
+          status: 'failed',
+          errorMessage,
+          finishedAt: now,
+        },
+      })
+    },
+
     async hasPublishedItem(itemId) {
       const record = await prismaClient.publishedOffer.findUnique({
         where: { itemId },

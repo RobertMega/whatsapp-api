@@ -30,6 +30,33 @@ function getPreferredLink(urlData, linkFormat) {
   return urlData.short_url || urlData.long_url
 }
 
+function buildAffiliateLinkResult(url, {
+  source = 'affiliate',
+  usedFallback = false,
+  fallbackReason,
+} = {}) {
+  return {
+    url,
+    source,
+    usedFallback,
+    ...(fallbackReason ? { fallbackReason } : {}),
+  }
+}
+
+function isAffiliateAuthorizationError(error) {
+  return /session expired|not authorized/i.test(error?.message || '')
+}
+
+function isClosedSessionError(error) {
+  return /target page, context or browser has been closed|browser has been closed/i.test(error?.message || '')
+}
+
+function buildReauthenticationError() {
+  return new Error(
+    'Refresh the Mercado Livre affiliate login before running the bot again. The saved affiliate session is no longer authorized.',
+  )
+}
+
 async function loadPlaywright(playwrightModule) {
   if (playwrightModule) {
     return playwrightModule
@@ -61,6 +88,13 @@ export async function createPlaywrightAffiliateSession({
     headless,
     userAgent,
     viewport,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--no-first-run',
+      '--no-default-browser-check',
+    ],
   }
 
   if (channel) {
@@ -75,8 +109,16 @@ export async function createPlaywrightAffiliateSession({
   let context
 
   if (userDataDir) {
-    context = await browserType.launchPersistentContext(userDataDir, launchOptions)
-  } else {
+    try {
+      context = await browserType.launchPersistentContext(userDataDir, launchOptions)
+    } catch (error) {
+      if (!storageStatePath) {
+        throw error
+      }
+    }
+  }
+
+  if (!context) {
     browser = await browserType.launch(launchOptions)
     context = await browser.newContext(
       storageStatePath
@@ -174,13 +216,49 @@ export function createAffiliateLinkProvider({
   userAgent =
     process.env.ML_AFFILIATE_PLAYWRIGHT_USER_AGENT ||
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+  logger = console,
 } = {}) {
   let sessionPromise
   const normalizedTag = normalizeTag(tag)
 
+  function createSession(options = {}) {
+    return createAffiliateSession({
+      playwrightModule,
+      storageStatePath: options.storageStatePath ?? storageStatePath,
+      userDataDir: options.userDataDir ?? userDataDir,
+      headless,
+      timeoutMs,
+      channel,
+      executablePath,
+      hubUrl,
+      userAgent,
+    })
+  }
+
+  async function resetSession() {
+    if (!sessionPromise) {
+      return
+    }
+
+    try {
+      const session = await sessionPromise
+      await session.close?.()
+    } catch {}
+
+    sessionPromise = undefined
+  }
+
+  async function getSession(options = {}) {
+    if (!sessionPromise) {
+      sessionPromise = createSession(options)
+    }
+
+    return sessionPromise
+  }
+
   return {
     async getAffiliateLink(item) {
-      if (templateUrl) {
+      if (templateUrl && !normalizedTag) {
         return applyTemplate(templateUrl, item)
       }
 
@@ -194,25 +272,101 @@ export function createAffiliateLinkProvider({
         )
       }
 
-      if (!sessionPromise) {
-        sessionPromise = createAffiliateSession({
-          playwrightModule,
-          storageStatePath,
-          userDataDir,
-          headless,
-          timeoutMs,
-          channel,
-          executablePath,
-          hubUrl,
-          userAgent,
-        })
-      }
-
-      const session = await sessionPromise
-      const payload = await session.createLink({
+      const requestPayload = {
         urls: [normalizePermalink(item.permalink)],
         tag: normalizedTag,
-      })
+      }
+      let payload
+
+      try {
+        const session = await getSession()
+        payload = await session.createLink(requestPayload)
+      } catch (error) {
+        const canRetryWithProfile =
+          isAffiliateAuthorizationError(error) &&
+          storageStatePath &&
+          userDataDir
+
+        if (canRetryWithProfile) {
+          await resetSession()
+          const session = await getSession({
+            storageStatePath: '',
+            userDataDir,
+          })
+          try {
+            payload = await session.createLink(requestPayload)
+            await session.saveStorageState?.(storageStatePath)
+            logger.info?.({
+              event: 'ml_affiliate_session_recovered_from_profile',
+              storageStatePath,
+              userDataDir,
+            })
+          } catch (retryError) {
+            if (isAffiliateAuthorizationError(retryError)) {
+              logger.warn?.({
+                event: 'ml_affiliate_session_reauth_required',
+                storageStatePath,
+                userDataDir,
+                errorMessage: retryError.message,
+              })
+
+              if (templateUrl) {
+                logger.warn?.({
+                  event: 'ml_affiliate_template_fallback_used',
+                  itemId: item.id,
+                  permalink: item.permalink,
+                })
+                return buildAffiliateLinkResult(applyTemplate(templateUrl, item), {
+                  source: 'template',
+                  usedFallback: true,
+                })
+              }
+
+              return buildAffiliateLinkResult(item.permalink, {
+                source: 'permalink',
+                usedFallback: true,
+                fallbackReason: 'affiliate_reauth_required',
+              })
+            }
+
+            throw retryError
+          }
+        } else if (isClosedSessionError(error)) {
+          await resetSession()
+          const session = await getSession()
+          payload = await session.createLink(requestPayload)
+        } else {
+          if (isAffiliateAuthorizationError(error)) {
+            logger.warn?.({
+              event: 'ml_affiliate_session_reauth_required',
+              storageStatePath,
+              userDataDir,
+              errorMessage: error.message,
+            })
+
+            if (templateUrl) {
+              logger.warn?.({
+                event: 'ml_affiliate_template_fallback_used',
+                itemId: item.id,
+                permalink: item.permalink,
+              })
+                return buildAffiliateLinkResult(applyTemplate(templateUrl, item), {
+                  source: 'template',
+                  usedFallback: true,
+                })
+              }
+
+            return buildAffiliateLinkResult(item.permalink, {
+              source: 'permalink',
+              usedFallback: true,
+              fallbackReason: 'affiliate_reauth_required',
+            })
+          }
+
+          throw error
+        }
+      }
+
       const urlData = payload.urls?.[0]
       const affiliateLink = urlData ? getPreferredLink(urlData, linkFormat) : ''
 
@@ -220,16 +374,10 @@ export function createAffiliateLinkProvider({
         throw new Error('Mercado Livre affiliate response did not include a usable link.')
       }
 
-      return affiliateLink
+      return buildAffiliateLinkResult(affiliateLink)
     },
     async close() {
-      if (!sessionPromise) {
-        return
-      }
-
-      const session = await sessionPromise
-      sessionPromise = undefined
-      await session.close?.()
+      await resetSession()
     },
   }
 }

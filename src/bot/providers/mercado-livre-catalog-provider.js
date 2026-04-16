@@ -1,12 +1,32 @@
+import { existsSync } from 'fs'
+
+let stealthApplied = false
+
 async function loadPlaywright(playwrightModule) {
   if (playwrightModule) {
     return playwrightModule
   }
 
   try {
-    return await import('playwright')
+    const [playwrightExtraModule, stealthPluginModule] = await Promise.all([
+      import('playwright-extra'),
+      import('puppeteer-extra-plugin-stealth'),
+    ])
+
+    const createStealthPlugin = stealthPluginModule.default || stealthPluginModule
+
+    if (!stealthApplied && typeof playwrightExtraModule.chromium?.use === 'function') {
+      playwrightExtraModule.chromium.use(createStealthPlugin())
+      stealthApplied = true
+    }
+
+    return playwrightExtraModule
   } catch (error) {
-    throw new Error(`Playwright is not installed for the bot runtime: ${error.message}`)
+    try {
+      return await import('playwright')
+    } catch (playwrightError) {
+      throw new Error(`Playwright is not installed for the bot runtime: ${playwrightError.message}`)
+    }
   }
 }
 
@@ -48,7 +68,7 @@ function extractCouponFromApiItem(item) {
   )
 }
 
-function normalizeApiItem(item) {
+function normalizeApiItem(item, sourceFilter = null) {
   const salePrice = item.sale_price?.amount
 
   return {
@@ -60,6 +80,7 @@ function normalizeApiItem(item) {
     currencyId: item.currency_id,
     permalink: item.permalink,
     thumbnailUrl: item.secure_thumbnail || item.thumbnail,
+    sourceFilter,
   }
 }
 
@@ -67,19 +88,118 @@ function normalizeFilter(filter) {
   return filter?.trim()
 }
 
-function createSearchUrl(filter) {
-  return `https://lista.mercadolivre.com.br/${encodeURIComponent(filter).replaceAll('%20', '-')}`
-}
+function createSearchUrl(filter, offset = 0) {
+  const baseUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(filter).replaceAll('%20', '-')}`
 
-function shuffleItems(items, randomInt) {
-  const shuffled = [...items]
-
-  for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    const swapIndex = randomInt(index + 1)
-    ;[shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]]
+  if (offset <= 0) {
+    return baseUrl
   }
 
-  return shuffled
+  return `${baseUrl}_Desde_${offset + 1}_NoIndex_True`
+}
+
+function createApiSearchUrl(siteId, filter, limit, offset = 0) {
+  const url = new URL(`https://api.mercadolibre.com/sites/${siteId}/search`)
+  url.searchParams.set('q', filter)
+  url.searchParams.set('limit', String(limit))
+
+  if (offset > 0) {
+    url.searchParams.set('offset', String(offset))
+  }
+
+  return url.toString()
+}
+
+function getRandomDelay(minDelayMs, maxDelayMs, randomInt) {
+  const safeMin = Math.max(0, minDelayMs)
+  const safeMax = Math.max(safeMin, maxDelayMs)
+
+  if (safeMax === safeMin) {
+    return safeMin
+  }
+
+  return safeMin + randomInt(safeMax - safeMin + 1)
+}
+
+async function waitRandomDelay(minDelayMs, maxDelayMs, randomInt, sleepFn) {
+  const delayMs = getRandomDelay(minDelayMs, maxDelayMs, randomInt)
+
+  if (delayMs > 0) {
+    await sleepFn(delayMs)
+  }
+}
+
+async function collectFreshItems(
+  pageItems,
+  collectedItems,
+  targetItemCount,
+  {
+    isRecentlyPublished = async () => false,
+    maxItems = Number.POSITIVE_INFINITY,
+  } = {},
+) {
+  let collectedFromPage = 0
+
+  for (const item of pageItems) {
+    if (!item?.id) {
+      continue
+    }
+
+    if (await isRecentlyPublished(item)) {
+      continue
+    }
+
+    collectedItems.push(item)
+    collectedFromPage += 1
+
+    if (collectedItems.length >= targetItemCount) {
+      return true
+    }
+
+    if (collectedFromPage >= maxItems) {
+      return false
+    }
+  }
+
+  return false
+}
+
+async function fetchWithTimeout(fetchImpl, url, timeoutMs) {
+  if (!(timeoutMs > 0)) {
+    return fetchImpl(url)
+  }
+
+  let timeoutId
+
+  try {
+    return await Promise.race([
+      fetchImpl(url),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`Mercado Livre catalog request timed out after ${timeoutMs}ms`))
+        }, timeoutMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+function shouldUseBrowserFallbackForApiError(error) {
+  return /timed out|abort|fetch failed|network/i.test(error?.message || '')
+}
+
+function isClosedBrowserError(error) {
+  return /target page, context or browser has been closed|browser has been closed/i.test(error?.message || '')
+}
+
+function getRawTargetItemCount(targetItemCount) {
+  if (!Number.isFinite(targetItemCount)) {
+    return Number.POSITIVE_INFINITY
+  }
+
+  const safeTarget = Math.max(1, targetItemCount)
+  return Math.max(safeTarget * 2 + 2, safeTarget)
 }
 
 export async function createPlaywrightCatalogSearchSession({
@@ -87,9 +207,14 @@ export async function createPlaywrightCatalogSearchSession({
   headless = true,
   channel = 'chrome',
   executablePath = '',
+  storageStatePath = '',
   userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
   viewport = { width: 1440, height: 960 },
   timeoutMs = 30000,
+  minDelayMs = 1500,
+  maxDelayMs = 4000,
+  randomInt = (max) => Math.floor(Math.random() * max),
+  sleepFn = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
 } = {}) {
   const playwright = await loadPlaywright(playwrightModule)
   const browser = await playwright.chromium.launch({
@@ -101,17 +226,20 @@ export async function createPlaywrightCatalogSearchSession({
   const context = await browser.newContext({
     userAgent,
     viewport,
+    storageState: storageStatePath && existsSync(storageStatePath) ? storageStatePath : undefined,
   })
 
   const page = await context.newPage()
   page.setDefaultTimeout(timeoutMs)
 
   return {
-    async search(filter, limit) {
-      await page.goto(createSearchUrl(filter), { waitUntil: 'domcontentloaded' })
+    async search(filter, limit, { offset = 0 } = {}) {
+      await waitRandomDelay(minDelayMs, maxDelayMs, randomInt, sleepFn)
+      await page.goto(createSearchUrl(filter, offset), { waitUntil: 'domcontentloaded' })
       await page.waitForLoadState('networkidle').catch(() => {})
+      await waitRandomDelay(minDelayMs, maxDelayMs, randomInt, sleepFn)
 
-      return page.evaluate((resultLimit) => {
+      return page.evaluate(({ resultLimit, sourceFilter }) => {
         function parsePriceFromElement(element) {
           const fraction = element?.querySelector('.andes-money-amount__fraction')?.textContent?.trim()
           if (!fraction) {
@@ -179,13 +307,18 @@ export async function createPlaywrightCatalogSearchSession({
             currencyId: currency,
             permalink,
             thumbnailUrl: card.querySelector('img')?.getAttribute('src') || '',
+            sourceFilter,
           })
         }
 
         return items
-      }, limit)
+      }, { resultLimit: limit, sourceFilter: filter })
     },
     async close() {
+      if (storageStatePath) {
+        await context.storageState({ path: storageStatePath }).catch(() => {})
+      }
+
       await context.close()
       await browser.close()
     },
@@ -196,65 +329,163 @@ export function createMercadoLivreCatalogProvider({
   siteId = 'MLB',
   limitPerFilter = 20,
   fetchImpl = fetch,
+  apiTimeoutMs = 15000,
   createSearchSession = createPlaywrightCatalogSearchSession,
   randomInt = (max) => Math.floor(Math.random() * max),
   playwrightModule,
   headless = true,
   channel = 'chrome',
   executablePath = '',
+  storageStatePath = 'sessions/mercado-livre-catalog-storage-state.json',
   userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
   timeoutMs = 30000,
+  minDelayMs = 1500,
+  maxDelayMs = 4000,
+  maxPagesPerFilter = 5,
+  forceBrowserFallback = false,
 } = {}) {
   let searchSessionPromise
 
+  async function resetSearchSession() {
+    if (!searchSessionPromise) {
+      return
+    }
+
+    try {
+      const searchSession = await searchSessionPromise
+      await searchSession.close?.()
+    } catch {}
+
+    searchSessionPromise = undefined
+  }
+
+  async function getSearchSession() {
+    if (!searchSessionPromise) {
+      searchSessionPromise = createSearchSession({
+        playwrightModule,
+        headless,
+        channel,
+        executablePath,
+        storageStatePath,
+        userAgent,
+        timeoutMs,
+        minDelayMs,
+        maxDelayMs,
+        randomInt,
+      })
+    }
+
+    return searchSessionPromise
+  }
+
   return {
-    async search(filters) {
+    async search(filters, {
+      targetItemCount = Number.POSITIVE_INFINITY,
+      isRecentlyPublished = async () => false,
+    } = {}) {
       const normalizedFilters = filters.map(normalizeFilter).filter(Boolean)
       const items = []
+      const shouldPageDeeply = Number.isFinite(targetItemCount)
+      const pageLimit = shouldPageDeeply ? maxPagesPerFilter : 1
+      const rawTargetItemCount = getRawTargetItemCount(targetItemCount)
+      const maxItemsPerFilterPage = shouldPageDeeply && normalizedFilters.length
+        ? Math.max(1, Math.ceil(rawTargetItemCount / normalizedFilters.length))
+        : Number.POSITIVE_INFINITY
 
-      for (const filter of normalizedFilters) {
-        const apiUrl = `https://api.mercadolibre.com/sites/${siteId}/search?q=${encodeURIComponent(filter)}&limit=${limitPerFilter}`
-        const response = await fetchImpl(apiUrl)
+      for (let pageIndex = 0; pageIndex < pageLimit; pageIndex += 1) {
+        let collectedInRound = false
+        let reachedTargetInRound = false
 
-        if (response.ok) {
-          const payload = await response.json()
-          for (const item of payload.results ?? []) {
-            items.push(normalizeApiItem(item))
+        for (const filter of normalizedFilters) {
+          const offset = pageIndex * limitPerFilter
+          let pageItems = []
+          let shouldUseBrowserFallback = forceBrowserFallback
+
+          if (!forceBrowserFallback) {
+            try {
+              const response = await fetchWithTimeout(
+                fetchImpl,
+                createApiSearchUrl(siteId, filter, limitPerFilter, offset),
+                apiTimeoutMs,
+              )
+
+              if (response.ok) {
+                const payload = await response.json()
+                pageItems = (payload.results ?? []).map((item) => normalizeApiItem(item, filter))
+              } else if (response.status !== 403) {
+                throw new Error(`Mercado Livre catalog request failed with status ${response.status}`)
+              } else {
+                shouldUseBrowserFallback = true
+              }
+            } catch (error) {
+              if (!shouldUseBrowserFallbackForApiError(error)) {
+                throw error
+              }
+
+              shouldUseBrowserFallback = true
+            }
           }
 
-          continue
+          if (shouldUseBrowserFallback) {
+            try {
+              const searchSession = await getSearchSession()
+              pageItems = (await searchSession.search(filter, limitPerFilter, { offset })).map((item) => ({
+                ...item,
+                sourceFilter: item.sourceFilter ?? filter,
+              }))
+            } catch (error) {
+              if (!isClosedBrowserError(error)) {
+                throw error
+              }
+
+              await resetSearchSession()
+              const searchSession = await getSearchSession()
+              pageItems = (await searchSession.search(filter, limitPerFilter, { offset })).map((item) => ({
+                ...item,
+                sourceFilter: item.sourceFilter ?? filter,
+              }))
+            }
+          }
+
+          if (!pageItems.length) {
+            break
+          }
+
+          const reachedTarget = await collectFreshItems(
+            pageItems,
+            items,
+            rawTargetItemCount,
+            {
+              isRecentlyPublished,
+              maxItems: maxItemsPerFilterPage,
+            },
+          )
+
+          collectedInRound = true
+
+          if (reachedTarget || pageItems.length < limitPerFilter) {
+            if (reachedTarget) {
+              reachedTargetInRound = true
+              break
+            }
+
+            continue
+          }
         }
 
-        if (response.status !== 403) {
-          throw new Error(`Mercado Livre catalog request failed with status ${response.status}`)
+        if (reachedTargetInRound || !collectedInRound || items.length >= rawTargetItemCount) {
+          break
         }
-
-        if (!searchSessionPromise) {
-          searchSessionPromise = createSearchSession({
-            playwrightModule,
-            headless,
-            channel,
-            executablePath,
-            userAgent,
-            timeoutMs,
-          })
-        }
-
-        const searchSession = await searchSessionPromise
-        const scrapedItems = await searchSession.search(filter, limitPerFilter)
-        items.push(...scrapedItems)
       }
 
-      return shuffleItems(items, randomInt)
+      return {
+        termsProcessed: normalizedFilters.length,
+        rawItemsFound: items.length,
+        items,
+      }
     },
     async close() {
-      if (!searchSessionPromise) {
-        return
-      }
-
-      const searchSession = await searchSessionPromise
-      searchSessionPromise = undefined
-      await searchSession.close?.()
+      await resetSearchSession()
     },
   }
 }

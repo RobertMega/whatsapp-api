@@ -47,3 +47,63 @@ test('formatOfferMessage falls back when there is no available coupon', () => {
     'https://meli.la/2ABCDE',
   ].join('\n'))
 })
+
+test('formatOfferMessage identifies Amazon offers and includes discount when present', () => {
+  const body = formatOfferMessage(
+    {
+      platform: 'amazon',
+      title: 'Echo Dot',
+      price: 249.9,
+      currencyId: 'BRL',
+      discountPercent: 38,
+    },
+    'https://www.amazon.com.br/dp/B0ABC12345?tag=tag-20',
+  )
+
+  assert.equal(body.includes('OFERTA AMAZON'), true)
+  assert.equal(body.includes('38%'), true)
+})
+
+test('formatOfferMessage renders Amazon coupon value and code only when extracted', () => {
+  const body = formatOfferMessage(
+    {
+      platform: 'amazon',
+      title: 'Produto com cupom',
+      price: 59.9,
+      currencyId: 'BRL',
+      coupons: [
+        {
+          coupon_value: 'R$20 off',
+          coupon_code: 'VEMNOAPP',
+          coupon_text: 'Aplicar cupom de R$20 off Insira o código VEMNOAPP',
+        },
+        {
+          coupon_value: 'R$10 off',
+          coupon_code: null,
+          coupon_text: 'Cupom R$10 off disponível',
+        },
+      ],
+    },
+    'https://amzn.to/4sHAqQP',
+  )
+
+  assert.equal(body.includes('Cupom: R$20 off'), true)
+  assert.equal(body.includes('Código: VEMNOAPP'), true)
+  assert.equal(body.includes('Cupom: R$10 off'), true)
+  assert.equal(body.includes('SEM CUPOM'), false)
+})
+
+test('formatOfferMessage omits Amazon coupon block when no coupon was extracted', () => {
+  const body = formatOfferMessage(
+    {
+      platform: 'amazon',
+      title: 'Produto sem cupom',
+      price: 59.9,
+      currencyId: 'BRL',
+    },
+    'https://amzn.to/4sHAqQP',
+  )
+
+  assert.equal(body.includes('CUPOM'), false)
+  assert.equal(body.includes('Cupom:'), false)
+})
